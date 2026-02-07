@@ -1,7 +1,7 @@
 # Paqet Tunnel Deployment Script
 
 Don't forget to star this repository! ⭐
-
+ 
 A simple, automated script to deploy a direct tunnel between Iran (Client) and Kharej/External (Server) using **paqet** in **KCP** mode.
 
 ## 🚀 Quick Install (Linux)
