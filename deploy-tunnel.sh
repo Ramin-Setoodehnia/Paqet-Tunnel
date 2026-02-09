@@ -22,6 +22,7 @@ declare -a TUNNEL_SERVERS
 declare -a TUNNEL_PORTS
 declare -a TUNNEL_KEYS
 declare -a TUNNEL_FORWARD_RULES
+declare -a INTERFACE_IPV4S
 
 # Functions for output
 print_header() {
@@ -168,6 +169,61 @@ normalize_port() {
     fi
 }
 
+# Select a single IPv4 address to bind/listen on (supports multi-IP interfaces)
+select_local_ipv4() {
+    if [ ${#INTERFACE_IPV4S[@]} -eq 0 ]; then
+        print_error "No IPv4 addresses available on interface $INTERFACE"
+        return 1
+    fi
+
+    # If a bind IP is provided via CLI, validate and use it directly.
+    if [ -n "$BIND_IP" ]; then
+        for ip in "${INTERFACE_IPV4S[@]}"; do
+            if [ "$ip" = "$BIND_IP" ]; then
+                LOCAL_IP="$BIND_IP"
+                print_success "Selected local IPv4 (from --bind-ip): $LOCAL_IP"
+                return 0
+            fi
+        done
+        print_error "Bind IP '$BIND_IP' is not assigned to interface $INTERFACE"
+        print_info "Available IPv4 addresses: ${INTERFACE_IPV4S[*]}"
+        return 1
+    fi
+
+    # Single-IP interface: select automatically.
+    if [ ${#INTERFACE_IPV4S[@]} -eq 1 ]; then
+        LOCAL_IP="${INTERFACE_IPV4S[0]}"
+        print_success "Local IPv4: $LOCAL_IP"
+        return 0
+    fi
+
+    # Multi-IP interface: ask user which IP should be used.
+    print_warning "Multiple IPv4 addresses detected on interface $INTERFACE"
+    print_info "Choose the IP address to use for this tunnel:"
+    local i=1
+    for ip in "${INTERFACE_IPV4S[@]}"; do
+        echo -e "  ${WHITE}$i)${NC} $ip"
+        ((i++))
+    done
+
+    local choice=""
+    while true; do
+        read -p "Select IPv4 (1-${#INTERFACE_IPV4S[@]}, default: 1): " choice
+        choice=$(echo "$choice" | tr -d '[:space:]')
+        if [ -z "$choice" ]; then
+            choice="1"
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#INTERFACE_IPV4S[@]} ]; then
+            LOCAL_IP="${INTERFACE_IPV4S[$((choice-1))]}"
+            print_success "Selected local IPv4: $LOCAL_IP"
+            return 0
+        fi
+
+        print_warning "Invalid choice. Enter a number between 1 and ${#INTERFACE_IPV4S[@]}."
+    done
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -269,13 +325,30 @@ get_network_details() {
     
     print_info "Using network interface: $INTERFACE"
     
-    # Get local IP
-    LOCAL_IP=$(ip addr show "$INTERFACE" | grep "inet " | awk '{print $2}' | cut -d'/' -f1)
-    if [ -z "$LOCAL_IP" ]; then
+    # Collect local IPv4 addresses for this interface.
+    INTERFACE_IPV4S=()
+    while IFS= read -r ip; do
+        [ -n "$ip" ] || continue
+        INTERFACE_IPV4S+=("$ip")
+    done < <(ip -o -4 addr show dev "$INTERFACE" scope global | awk '{print $4}' | cut -d'/' -f1)
+
+    # Fallback if no scope=global address exists in this environment.
+    if [ ${#INTERFACE_IPV4S[@]} -eq 0 ]; then
+        while IFS= read -r ip; do
+            [ -n "$ip" ] || continue
+            INTERFACE_IPV4S+=("$ip")
+        done < <(ip -o -4 addr show dev "$INTERFACE" | awk '{print $4}' | cut -d'/' -f1)
+    fi
+
+    if [ ${#INTERFACE_IPV4S[@]} -eq 0 ]; then
         print_error "Could not get IP for interface $INTERFACE"
         exit 1
     fi
-    print_success "Local IPv4: $LOCAL_IP"
+    
+    # Ensure only one IP is used in generated configs (important for multi-IP servers).
+    if ! select_local_ipv4; then
+        exit 1
+    fi
     
     # Get gateway IP
     GATEWAY_IP=$(ip route | grep default | awk '{print $3}')
@@ -1433,6 +1506,7 @@ CONFIG_FILE=""
 INTERFACE=""
 SERVER_ADDRESS=""
 SERVER_PORT="9999"
+BIND_IP=""
 PROXY_TYPE="socks5"
 FORWARD_LOCAL_PORT="8080"
 FORWARD_TARGET_HOST=""
@@ -1483,6 +1557,10 @@ if [[ $# -gt 0 ]]; then
                             print_error "Invalid server port: $2"
                             exit 1
                         fi
+                        shift 2
+                        ;;
+                    --bind-ip)
+                        BIND_IP=$(echo "$2" | tr -d '[:space:]')
                         shift 2
                         ;;
                     --key)
@@ -1560,6 +1638,10 @@ while [[ $# -gt 0 ]]; do
                 print_error "Invalid server port: $2"
                 exit 1
             fi
+            shift 2
+            ;;
+        --bind-ip)
+            BIND_IP=$(echo "$2" | tr -d '[:space:]')
             shift 2
             ;;
         --key)
